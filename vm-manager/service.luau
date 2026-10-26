@@ -23,23 +23,50 @@ local function publish()
 	noctalia.state.set("vms", snapshot)
 end
 
+-- Parses a "virsh list" style table (" Id  Name  State"). Domain names may
+-- contain spaces, so name and state are sliced by column position rather than
+-- by whitespace tokens: libvirt pads every field to its column width, so the
+-- State column starts at the same character offset on every row. The offset
+-- comes from the header line, which keeps multi-word names intact (e.g. "AI
+-- Sandbox" must not become name "AI" with state "Sandbox running").
 local function parseVirshList(output)
-	local vms = {}
+	local lines = {}
 	for line in output:gmatch("[^\r\n]+") do
-		-- "virsh list --all" rows: "<id>  <name>  <state>"; state may contain spaces.
-		-- Tokenize by whitespace; skip header and separator lines (their first
-		-- token is neither a domain id nor "-").
-		local fields = {}
-		for field in line:gmatch("%S+") do
-			table.insert(fields, field)
-		end
-		local id = fields[1]
-		if #fields >= 3 and (id == "-" or id:match("^%d+$")) then
-			table.insert(vms, {
-				id = id,
-				name = fields[2],
-				state = noctalia.string.trim(table.concat(fields, " ", 3)),
-			})
+		table.insert(lines, line)
+	end
+
+	-- First non-empty line is the column header; locate the State column.
+	local header = noctalia.string.trim(lines[1] or "")
+	local stateCol = header:find("State", 1, true) or header:find("state", 1, true)
+	stateCol = stateCol or 0
+
+	local vms = {}
+	-- With a State header present, start after it (line 2 is the dash
+	-- separator row, skipped below). Otherwise fall back to whitespace
+	-- tokenizing for unusual output.
+	local from = stateCol > 0 and 2 or 1
+	for i = from, #lines do
+		local line = lines[i]
+		local trimmed = noctalia.string.trim(line)
+		if trimmed ~= "" and not trimmed:match("^%-+$") then
+			-- Id is the first whitespace-delimited token.
+			local id = line:match("^%s*(%S+)")
+			if id == "-" or id:match("^%d+$") then
+				local name, state
+				if stateCol > 0 then
+					local idFinish = line:find(id, 1, true) + #id - 1
+					name = noctalia.string.trim(line:sub(idFinish + 1, stateCol - 1))
+					state = noctalia.string.trim(line:sub(stateCol))
+				else
+					local fields = {}
+					for field in line:gmatch("%S+") do
+						table.insert(fields, field)
+					end
+					name = fields[2]
+					state = noctalia.string.trim(table.concat(fields, " ", 3))
+				end
+				table.insert(vms, { id = id, name = name, state = state })
+			end
 		end
 	end
 	return vms
